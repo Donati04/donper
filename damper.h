@@ -48,7 +48,41 @@ struct stat_info
 	uint32_t packets_drop, octets_drop;
 } __attribute__((packed));
 
+/* 
+ * Need to study how to resolve:
+ *  - donper.conf structure (maybe copy tc command)
+ *  - Borrowing and priotirty of the children
+ *  - Generation of new tokens
+ *  - Same struct for parent and children?
+ *  - Queue for each node
+ */
+ /* initial idea for nodes of htb gerarchy */
+struct htb_node {
+    int classId;
+    struct htb_node *parent;
+    struct htb_node *children;
 
+    uint64_t rate;    /* or limit, bit/s */
+    uint64_t ceil;    /* for borrowing, bit/s */
+
+    int64_t tokens;   /* number of tokens in the bucket, token = byte */
+    int64_t burst;    /* bucket size, byte */
+
+    time_t curr_timestamp, old_timestamp;  /* new tokens generation maybe but i need to check this */
+
+    int priority;     /* priority between children */
+  
+    /* queue */
+	  int queue;               /* nfqueue queue id */
+	  struct nfq_q_handle *qh; /* queue handle */
+	  int nfqlen;              /* internal queue length */
+
+	  struct mpacket *packets;
+	  double *prioarray;
+	  size_t qlen;
+};
+
+/* i don't need you anymore */
 struct userdata
 {
 	int queue;               /* nfqueue queue id */
