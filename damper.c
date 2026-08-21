@@ -31,7 +31,7 @@ on_term(int signum)
 }
 
 
-/* convert string with optional suffixes 'k', 'm' or 'g' (bits per second) to bytes per second */
+/* convert string with optional suffixes 'k', 'm' or 'g' to bytes */
 static uint64_t
 str2bytes(const char *l)
 {
@@ -86,7 +86,6 @@ fopen_or_create(const char *path)
 	return NULL;
 }
 
-/* Need to be done correctly */
 static int
 config_read(struct htb_parent *parent, struct htb_child *child, char *confname)
 {
@@ -126,7 +125,7 @@ config_read(struct htb_parent *parent, struct htb_child *child, char *confname)
     else if (!strcmp(cmd, "burst")) {
       parent->burst = str2bytes(p1)
     }
-    /* fot htb or tbf*/
+    /* for htb or tbf*/
     else if (!strcmp(cmd, "htb")) {
       if (!strcmp(cmd, "yes")) {
         parent->htb = 1;
@@ -141,12 +140,12 @@ config_read(struct htb_parent *parent, struct htb_child *child, char *confname)
 		    goto fail_create;
 	    }
       parent->children[n_children]->mark = atoi(p2);
-      parent->children[n_children]->rate = atoi(p4);
-      parent->children[n_children]->ceil = atoi(p6);
-      parent->children[n_children]->burst = atoi(p8);
-
+      parent->children[n_children]->rate = str2bytes(p4)/8;
+      parent->children[n_children]->ceil = str2bytes(p6)/8;
+      parent->children[n_children]->burst = str2bytes(p8);
+      parent->n_children += 1;
+		/* module parameters */
     } else {
-			/* module parameters */
 			size_t i;
 			for (i=0; modules[i].name; i++) {
 				if (!strcmp(cmd, modules[i].name) && modules[i].conf) {
@@ -184,7 +183,6 @@ tree_init(char *confname, struct htb_parent *parent)
 		goto fail_create;
 	}
 
-
   /* init modules */
 	for (i=0; modules[i].name; i++) {
 		if (modules[i].init) {
@@ -201,6 +199,14 @@ tree_init(char *confname, struct htb_parent *parent)
 	if (!config_read(parent, confname)) {
 		goto fail_conf;
 	}
+  
+  
+  /* For each child */
+  parent->children[n_children]->tokens = burst;
+  parent->children[n_children]->ceil_burst = (uint64_t) ((double)burst * ceil / rate);
+  parent->children[n_children]->ceil_tokens = ceil_burst;
+  parent->children[n_children]->qlen = 100;
+  // prioarray and mpacket too
 
 }
 
