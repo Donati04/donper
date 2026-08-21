@@ -62,7 +62,7 @@ struct htb_child {
     int64_t ceil_tokens;   /* number of token for borrowing */
     int64_t ceil_burst;    /* burst for borrowing */
 
-    time_t curr_timestamp, old_timestamp;  /* new tokens generation maybe but i need to check this */
+    struct timespec old_time;  /* old time to generate new tokens */
 
     /* priotirty queue */
     struct mpacket *packets;
