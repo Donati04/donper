@@ -30,9 +30,10 @@ on_term(int signum)
 	damper_done = 1;
 }
 
+
 /* convert string with optional suffixes 'k', 'm' or 'g' (bits per second) to bytes per second */
 static uint64_t
-str2bps(const char *l)
+str2bytes(const char *l)
 {
 	char unit;
 	size_t len;
@@ -69,7 +70,7 @@ str2bps(const char *l)
 		k = 0;
 	}
 
-	return res * k / 8;
+	return res * k;
 }
 
 FILE *
@@ -85,208 +86,9 @@ fopen_or_create(const char *path)
 	return NULL;
 }
 
-static void
-stat_remove_old(struct userdata *u)
-{
-	DIR *dir;
-	struct dirent *de;
-
-	/* search for files by extension (.dat) and remove old */
-	dir = opendir(u->statdir);
-	if (!dir) {
-		fprintf(stderr, "Can't list data dir %s\n", u->statdir);
-		return;
-	}
-
-	while ((de = readdir(dir))) {
-		char *ext, *day_start;
-		char buf[PATH_MAX];
-		const int extlen = 4;
-		int day, days;
-		size_t len;
-		time_t t;
-
-		len = strlen(de->d_name);
-		if (len <= extlen) {
-			/* file name too short */
-			continue;
-		}
-
-		ext = de->d_name + (len - extlen);
-		if (strstr(ext, ".dat") == NULL) {
-			continue;
-		}
-
-		memcpy(buf, de->d_name, len - extlen);
-		buf[len - extlen] = '\0';
-
-		/* search for "." before extension */
-		day_start = strrchr(buf, '.');
-		if (!day_start) {
-			continue;
-		}
-		day_start++;
-
-		/* now day (DDMMYY in file name) is in buf */
-		day = atoi(day_start);
-		if (day <= 0) {
-			continue;
-		}
-
-		/* calculate time_t for file */
-		t = day2epoch(day);
-
-		/* days between current timestamp and file */
-		days = (u->curr_timestamp - t) / (60 * 60 * 24);
-		if (days > u->keep_stat) {
-			char path[PATH_MAX];
-
-			snprintf(path, PATH_MAX, "%s/%s", u->statdir, de->d_name);
-			fprintf(stderr, "Removing old statistics file '%s'\n", path);
-			unlink(path);
-		}
-	}
-
-	closedir(dir);
-}
-
-static void
-stat_init(struct userdata *u)
-{
-	if (u->statdir[0] == '\0') {
-		fprintf(stderr, "Directory for statistics is not set\n");
-		goto fail;
-	}
-
-	u->curr_timestamp = time(NULL);
-	u->old_timestamp = u->curr_timestamp;
-
-	u->cday = 0;
-	u->statf = NULL;
-	u->daystart = 0;
-
-	memset(&u->stat_info, 0, sizeof(u->stat_info));
-
-	if (u->wchart) {
-		size_t i;
-
-		for (i=0; modules[i].name; i++) {
-			modules[i].statf = NULL;
-		}
-	}
-
-	return;
-fail:
-	u->stat = 0;
-}
-
-static void
-stat_write(struct userdata *u)
-{
-	int day;
-	struct tm *t;
-	size_t i;
-
-	/* get date in form DDMMYY */
-	t = gmtime(&u->curr_timestamp);
-	day = t->tm_mday * 100 * 100 + (t->tm_mon + 1) * 100 + (t->tm_year - 100);
-
-	if (day != u->cday) {
-		char path[PATH_MAX];
-
-		/* day changed, close old file */
-		if (u->statf) {
-			fclose(u->statf);
-			u->statf = NULL;
-		}
-		/* files in modules */
-		if (u->wchart) {
-			for (i=0; modules[i].name; i++) {
-				if (modules[i].statf) {
-					fclose(modules[i].statf);
-					modules[i].statf = NULL;
-				}
-			}
-		}
-
-		/* and open new files */
-		snprintf(path, PATH_MAX, "%s/dstat.%06d.dat", u->statdir, day);
-		u->statf = fopen_or_create(path);
-		if (!u->statf) {
-			/* can't open file, stop collecting stats */
-			u->stat = 0;
-			return;
-		}
-		if (u->wchart) {
-			for (i=0; modules[i].name; i++) {
-				snprintf(path, PATH_MAX, "%s/%s.%06d.dat", u->statdir, modules[i].name, day);
-				modules[i].statf = fopen_or_create(path);
-				if (!modules[i].statf) {
-					u->wchart = 0;
-					return;
-				}
-			}
-		}
-		u->cday = day;
-
-		/* calculate time_t when day start */
-		t->tm_hour = t->tm_min = t->tm_sec = 0;
-		u->daystart = timegm(t);
-
-		/* delete old statistics files */
-		stat_remove_old(u);
-	}
-
-	fseek(u->statf, (u->curr_timestamp - u->daystart) * sizeof(struct stat_info), SEEK_SET);
-	fwrite(&u->stat_info, 1, sizeof(struct stat_info), u->statf); /* FIXME: check result? */
-
-	memset(&u->stat_info, 0, sizeof(u->stat_info));
-
-	/* write weights chart */
-	if (u->wchart) {
-		for (i=0; modules[i].name; i++) {
-			double avg;
-
-			avg = (modules[i].nw > DBL_EPSILON) ? (modules[i].stw / modules[i].nw) : 0.0f;
-
-			fseek(modules[i].statf, (u->curr_timestamp - u->daystart) * sizeof(double), SEEK_SET);
-			fwrite(&avg, 1, sizeof(double), modules[i].statf);
-
-			modules[i].stw = modules[i].nw = 0.0f;
-		}
-	}
-
-	u->old_timestamp = u->curr_timestamp;
-}
-
-static void *
-stat_thread(void *arg)
-{
-	struct userdata *u = arg;
-	struct timespec ts;
-
-	while (!damper_done) {
-		/* sleep for nearest second */
-		clock_gettime(CLOCK_MONOTONIC, &ts);
-		ts.tv_sec++;
-		ts.tv_nsec = 0;
-		clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL);
-
-		pthread_mutex_lock(&u->lock);
-		u->curr_timestamp++;
-
-		if (u->stat) {
-			stat_write(u);
-		}
-
-		pthread_mutex_unlock(&u->lock);
-	}
-
-	return NULL;
-}
-
+/* Need to be done correctly */
 static int
-config_read(struct userdata *u, char *confname)
+config_read(struct htb_parent *parent, struct htb_child *child, char *confname)
 {
 	FILE *f;
 	char line[LINE_MAX];
@@ -297,55 +99,53 @@ config_read(struct userdata *u, char *confname)
 		goto fail_open;
 	}
 
-	u->stat = 0;
-	u->statdir[0] = '\0';
-
-	u->keep_stat = 0;
-	u->nfqlen = 0;
-
-	u->wchart = 0;
+	parent->nfqlen = 0;
 
 	while (fgets(line, sizeof(line), f)) {
-		char cmd[LINE_MAX], p1[LINE_MAX], p2[LINE_MAX];
+		char cmd[LINE_MAX], p1[LINE_MAX], p2[LINE_MAX],  p3[LINE_MAX], p4[LINE_MAX],  p5[LINE_MAX], p6[LINE_MAX],  p7[LINE_MAX], p8[LINE_MAX];
 		int scanres;
 
-		scanres = sscanf(line, "%s %s %s", cmd, p1, p2);
-		if ((cmd[0] == '#') || (scanres < 2)) {
+		scanres = sscanf(line, "%s %s %s %s %s %s %s %s %s", cmd, p1, p2, p3, p4, p5, p6, p7, p8);
+		/* comment */
+    if ((cmd[0] == '#') || (scanres < 2)) {
 			continue;
 		}
+    /* nfequeue number */
 		if (!strcmp(cmd, "queue")) {
-			u->queue = atoi(p1);
-		} else if (!strcmp(cmd, "limit")) {
+			parent->queue = atoi(p1);
+		} 
+    /* parent rate/ceil */
+    else if (!strcmp(cmd, "limit")) {
 			if (!strcmp(p1, "no")) {
-				u->limit = UINT64_MAX;
+				parent->limit = UINT64_MAX;
 			} else {
-				u->limit = str2bps(p1);
+				parent->limit = str2bytes(p1)/8;
 			}
-		} else if (!strcmp(cmd, "stat")) {
-			if (!strcmp(p1, "yes")) {
-				u->stat = 1;
-			}
-		} else if (!strcmp(cmd, "keepstat")) {
-			u->keep_stat = atoi(p1);
-			if (u->keep_stat <= 0) {
-				fprintf(stderr, "Strange 'keepstat' value '%s', using %d instead", p1, KEEP_STAT);
-				u->keep_stat = KEEP_STAT;
-			}
-		} else if (!strcmp(cmd, "nfqlen")) {
-			u->nfqlen = atoi(p1);
-			if (u->nfqlen <= 0) {
-				fprintf(stderr, "Strange 'nfqlen' value '%s', using %d instead", p1, NFQ_DEFLEN);
-				u->nfqlen = NFQ_DEFLEN;
-			}
-		} else if (!strcmp(cmd, "wchart")) {
-			if (!strcmp(p1, "yes")) {
-				u->wchart = 1;
-			}
-		} else if (!strcmp(cmd, "statdir")) {
-			strncpy(u->statdir, p1, PATH_MAX);
-		} else if (!strcmp(cmd, "packets")) {
-			u->qlen = atoi(p1);
-		} else {
+		}
+    /* parent burst*/
+    else if (!strcmp(cmd, "burst")) {
+      parent->burst = str2bytes(p1)
+    }
+    /* fot htb or tbf*/
+    else if (!strcmp(cmd, "htb")) {
+      if (!strcmp(cmd, "yes")) {
+        parent->htb = 1;
+      } else {
+        parent->htb = 0;
+      }
+    /* new child node */
+		} else if (!strcmp(cmd, "class") && parent->htb == 1){
+      parent->children[n_children] = malloc(sizeof(struct htb_child))
+      if (!parent->children[n_children]) {
+		    fprintf(stderr, "malloc(%lu) failed\n", (long)sizeof(struct htb_child));
+		    goto fail_create;
+	    }
+      parent->children[n_children]->mark = atoi(p2);
+      parent->children[n_children]->rate = atoi(p4);
+      parent->children[n_children]->ceil = atoi(p6);
+      parent->children[n_children]->burst = atoi(p8);
+
+    } else {
 			/* module parameters */
 			size_t i;
 			for (i=0; modules[i].name; i++) {
@@ -359,7 +159,7 @@ config_read(struct userdata *u, char *confname)
 					break;
 				}
 			}
-		}
+		} 
 	}
 	fclose(f);
 	return 1;
@@ -368,6 +168,45 @@ fail_open:
 	return 0;
 }
 
+static void
+tree_init(char *confname, struct htb_parent *parent)
+{
+  parent = malloc(sizeof(struct htb_parent));
+	if (!parent) {
+		fprintf(stderr, "malloc(%lu) failed\n", (long)sizeof(struct htb_parent));
+		goto fail_create;
+	}
+
+  parent->n_children = 0;
+  parent->children = malloc(sizeof(struct htb_child *));
+	if (!parent->children) {
+		fprintf(stderr, "malloc(%lu) failed\n", (long)sizeof(struct *htb_child));
+		goto fail_create;
+	}
+
+
+  /* init modules */
+	for (i=0; modules[i].name; i++) {
+		if (modules[i].init) {
+			/* default multiplicator */
+			modules[i].k = 1.0f;
+
+			modules[i].mptr = (modules[i].init)(u, i);
+		} else {
+			modules[i].mptr = NULL;
+		}
+	}
+
+  /* New config_read() for the the parent node e the N child node */
+	if (!config_read(parent, confname)) {
+		goto fail_conf;
+	}
+
+}
+
+
+
+/* Old function() */
 static struct userdata *
 userdata_init(char *confname)
 {
@@ -402,15 +241,6 @@ userdata_init(char *confname)
 
 	if (u->nfqlen == 0) {
 		u->nfqlen = NFQ_DEFLEN;
-	}
-
-	/* setup statistics */
-	if (u->stat) {
-		if (u->keep_stat == 0) {
-			fprintf(stderr, "'keepstat' not set, statistics will be kept for %d days\n", KEEP_STAT);
-			u->keep_stat = KEEP_STAT;
-		}
-		stat_init(u);
 	}
 
 	/* reserve memory for packets in queue */
@@ -530,11 +360,6 @@ sender_thread(void *arg)
 			/* mark packet buffer as empty */
 			u->prioarray[idx] = DBL_MIN;
 
-			/* update statistics */
-			if (u->stat) {
-				u->stat_info.packets_pass += 1;
-				u->stat_info.octets_pass+= u->packets[idx].size;
-			}
 			sleep_ns = (u->packets[idx].size * BILLION) / limit;
 		} else {
 			/* no data to send, so just sleep for time required to transfer 100 bytes */
@@ -582,12 +407,6 @@ add_to_queue(struct userdata *u, char *packet, int id,
 			if (vres < 0) {
 				fprintf(stderr, "nfq_set_verdict() failed, %s\n", strerror(errno));
 			}
-
-			if (u->stat) {
-				/* and update statistics */
-				u->stat_info.packets_drop += 1;
-				u->stat_info.octets_drop += u->packets[idx].size;
-			}
 		}
 
 		u->prioarray[idx] = prio;
@@ -631,19 +450,9 @@ on_packet(struct nfq_q_handle *qh,
 	if (u->limit == 0) {
 		/* drop packet */
 		nfq_set_verdict(u->qh, id, NF_DROP, 0, NULL);
-		/* and update statistics */
-		if (u->stat) {
-			u->stat_info.packets_drop += 1;
-			u->stat_info.octets_drop += plen;
-		}
 	} else 	if (u->limit == UINT64_MAX) {
 		/* accept packet */
 		nfq_set_verdict(u->qh, id, NF_ACCEPT, plen, (unsigned char *)p);
-		/* and update statistics */
-		if (u->stat) {
-			u->stat_info.packets_pass += 1;
-			u->stat_info.octets_pass += plen;
-		}
 	}
 	wchartstat = u->wchart;
 	pthread_mutex_unlock(&u->lock);
@@ -680,11 +489,6 @@ on_packet(struct nfq_q_handle *qh,
 	if (weight < 0) {
 		/* drop packet with with negative weight */
 		nfq_set_verdict(u->qh, id, NF_DROP, 0, NULL);
-		/* update statistics */
-		if (u->stat) {
-			u->stat_info.packets_drop += 1;
-			u->stat_info.octets_drop += plen;
-		}
 	} else {
 		/* add to queue with positive weight */
 		add_to_queue(u, p, id, plen, weight);
@@ -709,6 +513,7 @@ main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
+  /* New fuction needed -> tree_init() or something */
 	u = userdata_init(argv[1]);
 	if (!u) {
 		return EXIT_FAILURE;
@@ -756,8 +561,6 @@ main(int argc, char *argv[])
 
 	/* create sending thread */
 	pthread_create(&u->sender_tid, NULL, &sender_thread, u);
-	/* and thread for updating statistics */
-	pthread_create(&u->stat_tid, NULL, &stat_thread, u);
 
 	fd = nfq_fd(h);
 	for (;;) {
@@ -778,9 +581,6 @@ main(int argc, char *argv[])
 		nfq_handle_packet(h, buf, rv);
 	}
 
-	pthread_join(u->stat_tid, NULL);
-	/* FIXME: sender thread? */
-
 	r = EXIT_SUCCESS;
 
 fail_mode:
@@ -795,4 +595,3 @@ fail_unbind:
 
 	return r;
 }
-
