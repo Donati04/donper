@@ -41,76 +41,54 @@ struct mpacket
 	unsigned char packet[DAMPER_MAX_PACKET_SIZE];
 };
 
-
-struct stat_info
-{
-	uint32_t packets_pass, octets_pass;
-	uint32_t packets_drop, octets_drop;
-} __attribute__((packed));
-
 /* 
  * Need to study how to resolve:
  *  - donper.conf structure (maybe copy tc command)
  *  - Borrowing and priotirty of the children
  *  - Generation of new tokens
- *  - Same struct for parent and children?
+ *  - Same struct for parent and children? For now no.
  *  - Queue for each node
  */
- /* initial idea for nodes of htb gerarchy */
-struct htb_node {
-    int classId;
-    struct htb_node *parent;
-    struct htb_node *children;
 
-    uint64_t rate;    /* or limit, bit/s */
-    uint64_t ceil;    /* for borrowing, bit/s */
+/* child node */
+struct htb_child {
+    uint32_t mark;
 
-    int64_t tokens;   /* number of tokens in the bucket, token = byte */
-    int64_t burst;    /* bucket size, byte */
+    uint64_t rate;         /* min, byte/s */
+    uint64_t ceil;         /* max with borrowing, byte/s */
+
+    int64_t tokens;        /* number of token in the bucket */
+    int64_t burst;         /* bucket size */
+    int64_t ceil_tokens;   /* number of token for borrowing */
+    int64_t ceil_burst;    /* burst for borrowing */
 
     time_t curr_timestamp, old_timestamp;  /* new tokens generation maybe but i need to check this */
 
-    int priority;     /* priority between children */
-  
-    /* queue */
-	  int queue;               /* nfqueue queue id */
-	  struct nfq_q_handle *qh; /* queue handle */
-	  int nfqlen;              /* internal queue length */
-
-	  struct mpacket *packets;
-	  double *prioarray;
-	  size_t qlen;
+    /* priotirty queue */
+    struct mpacket *packets;
+    double *prioarray;
+    size_t qlen;
 };
 
-/* i don't need you anymore */
-struct userdata
-{
-	int queue;               /* nfqueue queue id */
-	struct nfq_q_handle *qh; /* queue handle */
-	int nfqlen;              /* internal queue length */
+ /* parent node */
+struct htb_parent {
+    int queue;                /* nfequeue queue id */
+	  struct nfq_q_handle *qh;  /* queue handle */
+	  int nfqlen;               /* internal queue length */
+    
+    uint64_t limit;   /* or rate, bit/s */
+    int64_t tokens;   /* token = byte */
+    int64_t burst;    /* bucket size */
+    
+    struct timespec old_time;  /* old time to generate new tokens */
 
-	struct mpacket *packets;
-	double *prioarray;
-	size_t qlen;
+    pthread_t sender_tid;
+	  pthread_mutex_t lock;
 
-	uint64_t limit;
-
-	pthread_t sender_tid, stat_tid;
-	pthread_mutex_t lock;
-
-	int stat;                   /* enable statistics */
-	int keep_stat;              /* how many days keep statistics */
-	char statdir[PATH_MAX];
-
-	struct stat_info stat_info;
-	time_t curr_timestamp, old_timestamp;
-
-	FILE *statf;                /* stats file */
-	int   cday;                 /* current day for stats */
-	time_t daystart;            /* second when current day was started */
-
-	int wchart;                 /* enable weights chart */
+    struct htb_child **children;   /* array of the children */
+    size_t n_children;             /* number of children node */
 };
+
 
 /* modules */
 
