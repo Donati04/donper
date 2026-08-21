@@ -85,6 +85,7 @@ struct htb_parent {
     pthread_t sender_tid;
 	  pthread_mutex_t lock;
 
+    int htb;                       /* 1 for htb, 0 for tbf */
     struct htb_child **children;   /* array of the children */
     size_t n_children;             /* number of children node */
 };
