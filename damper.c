@@ -87,7 +87,7 @@ fopen_or_create(const char *path)
 }
 
 static int
-config_read(struct htb_parent *parent, struct htb_child *child, char *confname)
+config_read(struct htb_parent *parent, char *confname)
 {
 	FILE *f;
 	char line[LINE_MAX];
@@ -137,7 +137,7 @@ config_read(struct htb_parent *parent, struct htb_child *child, char *confname)
       parent->children[n_children] = malloc(sizeof(struct htb_child))
       if (!parent->children[n_children]) {
 		    fprintf(stderr, "malloc(%lu) failed\n", (long)sizeof(struct htb_child));
-		    goto fail_create;
+		    goto fail_child;
 	    }
       parent->children[n_children]->mark = atoi(p2);
       parent->children[n_children]->rate = str2bytes(p4)/8;
@@ -170,17 +170,20 @@ fail_open:
 static void
 tree_init(char *confname, struct htb_parent *parent)
 {
+  size_t i, j;
+  uint64_t temp_burst;
+
   parent = malloc(sizeof(struct htb_parent));
 	if (!parent) {
 		fprintf(stderr, "malloc(%lu) failed\n", (long)sizeof(struct htb_parent));
-		goto fail_create;
+		goto fail_parent;
 	}
 
   parent->n_children = 0;
   parent->children = malloc(sizeof(struct htb_child *));
 	if (!parent->children) {
 		fprintf(stderr, "malloc(%lu) failed\n", (long)sizeof(struct *htb_child));
-		goto fail_create;
+		goto fail_child;
 	}
 
   /* init modules */
@@ -199,76 +202,48 @@ tree_init(char *confname, struct htb_parent *parent)
 	if (!config_read(parent, confname)) {
 		goto fail_conf;
 	}
-  
-  
-  /* For each child */
-  parent->children[n_children]->tokens = burst;
-  parent->children[n_children]->ceil_burst = (uint64_t) ((double)burst * ceil / rate);
-  parent->children[n_children]->ceil_tokens = ceil_burst;
-  parent->children[n_children]->qlen = 100;
-  // prioarray and mpacket too
 
-}
-
-
-
-/* Old function() */
-static struct userdata *
-userdata_init(char *confname)
-{
-	struct userdata *u;
-	size_t i;
-
-	u = malloc(sizeof(struct userdata));
-	if (!u) {
-		fprintf(stderr, "malloc(%lu) failed\n", (long)sizeof(struct userdata));
-		goto fail_create;
-	}
-
-	/* init modules */
-	for (i=0; modules[i].name; i++) {
-		if (modules[i].init) {
-			/* default multiplicator */
-			modules[i].k = 1.0f;
-
-			modules[i].mptr = (modules[i].init)(u, i);
-		} else {
-			modules[i].mptr = NULL;
-		}
-	}
-
-	if (!config_read(u, confname)) {
-		goto fail_conf;
-	}
-
-	if (u->limit == 0) {
+  if (parent->limit == 0) {
 		fprintf(stderr, "Something is wrong with limit, all traffic will be blocked\n");
 	}
 
-	if (u->nfqlen == 0) {
-		u->nfqlen = NFQ_DEFLEN;
+	if (parent->nfqlen == 0) {
+		parent->nfqlen = NFQ_DEFLEN;
 	}
+  
+  /* other params of the children */
+  for (i=0; i < parent->n_children; i++) {
+    parent->children[i]->tokens = parent->children[i]->burst;
+    
+    /* cburst mantain the proportion between ceil and rate */
+    temp_burst = (uint64_t) ((double) parent->children[i]->burst * parent->children[i]->ceil / parent->children[i]->rate);
+    parent->children[i]->ceil_burst = temp_burst;
+    parent->children[i]->ceil_tokens = ceil_burst;
+    
+    /* priority queue len set at 100 by default */
+    parent->children[i]->qlen = 100;
 
-	/* reserve memory for packets in queue */
-	u->packets = malloc(u->qlen * sizeof(struct mpacket));
-	if (!u->packets) {
-		fprintf(stderr, "malloc(%lu) failed\n", (long)u->qlen * sizeof(struct mpacket));
-		goto fail_packets;
-	}
+	  /* reserve memory for packets in queue */
+    parent->children[i]->packets = malloc(parent->children[i]->qlen * sizeof(struct mpacket));
+	  if (!parent->children[i]->packets) {
+		  fprintf(stderr, "malloc(%lu) failed\n", (long)parent->children[i]->qlen * sizeof(struct mpacket));
+		  goto fail_packets;
+	  }
 
-	/* create priority array - simplified implementation of priority queue */
-	u->prioarray = malloc(u->qlen * sizeof(double));
-	if (!u->prioarray) {
-		fprintf(stderr, "malloc(%lu) failed\n", (long)u->qlen * sizeof(double));
-		goto fail_prio_array;
-	}
-	/* fill priority array with minimal possible values */
-	for (i=0; i<u->qlen; i++) {
-		u->prioarray[i] = DBL_MIN;
-	}
+    /* create priority array - simplified implementation of priority queue */
+	  parent->children[i]->prioarray = malloc(parent->children[i]->qlen  * sizeof(double));
+	  if (!u->prioarray) {
+		  fprintf(stderr, "malloc(%lu) failed\n", (long)parent->children[i]->qlen  * sizeof(double));
+		  goto fail_prio_array;
+	  }
+	  /* fill priority array with minimal possible values */
+	  for (i=0; i < parent->children[i]->qlen; i++) {
+		  parent->children[i]->prioarray[i] = DBL_MIN;
+	  }
+  }
 
-	/* init mutex */
-	pthread_mutex_init(&u->lock, NULL);
+  /* init mutex */
+	pthread_mutex_init(&parent->lock, NULL);
 
 	/* configuration done, notify modules */
 	for (i=0; modules[i].name; i++) {
@@ -286,21 +261,26 @@ userdata_init(char *confname)
 		}
 	}
 
-	return u;
+  return;
 
-	free(u->prioarray);
 fail_prio_array:
-	free(u->packets);
+  /* delete priority queues */
+	free(parent->children[i]->packets);
+  for (j=0; j < i; j++){
+    free(parent->children[j]->prioarray)
+    free(parent->children[j]->packets)
+  }
 fail_packets:
 fail_conf:
-	free(u);
-fail_create:
-
-	return NULL;
+	free(parent->children);
+fail_child:
+  free(parent);
+fail_parent:
+	return;
 }
 
 static void
-userdata_destroy(struct userdata *u)
+tree_destroy(struct htb_parent *parent)
 {
 	size_t i;
 
@@ -313,14 +293,14 @@ userdata_destroy(struct userdata *u)
 		}
 	}
 
-	pthread_mutex_destroy(&u->lock);
+	pthread_mutex_destroy(&parent->lock);
 
-	if (u->stat) {
-		fclose(u->statf);
-	}
-	free(u->prioarray);
-	free(u->packets);
-	free(u);
+  for (i=0, i < parent->n_children; i++) {
+	  free(parent->children[i]->prioarray)
+    free(parent->children[i]->packets)
+  }
+	free(parent->children);
+  free(parent);
 }
 
 static void *
