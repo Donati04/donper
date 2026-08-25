@@ -329,7 +329,7 @@ static void *
 sender_thread(void *arg)
 {
 
-	struct userdata *u = arg;
+	struct htb_parent *parent = arg;
 	int vres;
 	size_t i, idx = 0;
 	double max = DBL_MIN;
@@ -443,20 +443,19 @@ add_to_queue(struct htb_parent *parent, char *packet, int id,
 	}
 }
 
-/* CHANGE ME */
+
+/* drop packet or accept packet based on weight and limit */
 static int
 on_packet(struct nfq_q_handle *qh,
 		struct nfgenmsg *nfmsg,
 		struct nfq_data *nfad, void *data)
 {
-	int plen;
-	int id;
+	int plen, id;
 	char *p;
 	uint32_t mark;
-	struct userdata *u;
+	struct htb_parent *parent;
 	double weight = DBL_EPSILON;
 	size_t i;
-	int wchartstat;
 
 	struct nfqnl_msg_packet_hdr *ph = nfq_get_msg_packet_hdr(nfad);
 	if (ph) {
@@ -469,25 +468,17 @@ on_packet(struct nfq_q_handle *qh,
 		return -1;
 	}
 
-	u = data;
+	parent = data;
 
-	/* there are two special cases:
-	limit == 0 (traffic disabled) and limit == UINT64_MAX (no shaping performed) */
-	pthread_mutex_lock(&u->lock);
-
-	if (u->limit == 0) {
+	/* limit == 0 (traffic disabled) */
+	pthread_mutex_lock(&parent->lock);
+	if (parent->limit == 0) {
 		/* drop packet */
-		nfq_set_verdict(u->qh, id, NF_DROP, 0, NULL);
-	} else 	if (u->limit == UINT64_MAX) {
-		/* accept packet */
-		nfq_set_verdict(u->qh, id, NF_ACCEPT, plen, (unsigned char *)p);
-	}
-	wchartstat = u->wchart;
-	pthread_mutex_unlock(&u->lock);
-
-	if ((u->limit == 0) || (u->limit == UINT64_MAX)) {
-		return 1;
-	}
+		nfq_set_verdict(parent->qh, id, NF_DROP, 0, NULL);
+	  pthread_mutex_unlock(&parent->lock);
+    return 1;
+  }
+	pthread_mutex_unlock(&parent->lock);
 
 	mark = nfq_get_nfmark(nfad);
 
@@ -500,28 +491,21 @@ on_packet(struct nfq_q_handle *qh,
 				weight = mweight;
 				break;
 			}
-			mweight *= modules[i].k;
 
-			if (wchartstat) {
-				pthread_mutex_lock(&u->lock);
-				modules[i].stw += mweight;
-				modules[i].nw  += 1.0f;
-				pthread_mutex_unlock(&u->lock);
-			}
-
+			mweight *= modules[i].k;	
 			weight += mweight;
 		}
 	}
 
-	pthread_mutex_lock(&u->lock);
+	pthread_mutex_lock(&parent->lock);
 	if (weight < 0) {
 		/* drop packet with with negative weight */
-		nfq_set_verdict(u->qh, id, NF_DROP, 0, NULL);
+		nfq_set_verdict(parent->qh, id, NF_DROP, 0, NULL);
 	} else {
 		/* add to queue with positive weight */
 		add_to_queue(parent, p, id, plen, weight, mark);
 	}
-	pthread_mutex_unlock(&u->lock);
+	pthread_mutex_unlock(&parent->lock);
 
 	return 1;
 }
