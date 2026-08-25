@@ -387,6 +387,7 @@ sender_thread(void *arg)
 }
 
 /* search the node with the class mark equal to the packet iptables mark */
+/* FIX ME not working with tbf */
 static int
 search_node(struct htb_parent *parent, uint32_t mark)
 {
@@ -399,6 +400,7 @@ search_node(struct htb_parent *parent, uint32_t mark)
 }
 
 /* add packets to the queues */
+/* FIX ME not working with tbf */
 static void
 add_to_queue(struct htb_parent *parent, char *packet, int id,
 	int plen, double prio, uint32_t mark)
