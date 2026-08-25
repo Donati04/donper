@@ -137,7 +137,7 @@ config_read(struct htb_parent *parent, char *confname)
       parent->children[n_children] = malloc(sizeof(struct htb_child))
       if (!parent->children[n_children]) {
 		    fprintf(stderr, "malloc(%lu) failed\n", (long)sizeof(struct htb_child));
-		    goto fail_child;
+		    goto fail_open;
 	    }
       parent->children[n_children]->mark = atoi(p2);
       parent->children[n_children]->rate = str2bytes(p4)/8;
@@ -211,8 +211,26 @@ tree_init(char *confname, struct htb_parent *parent)
 		parent->nfqlen = NFQ_DEFLEN;
 	}
   
+  /* no class or no htb, then tbf */
+  if (parent->n_children == 0) {
+    parent->n_children += 1;
+    
+    /* using one child node for tbf */
+    parent->children[0] = malloc(sizeof(struct htb_child))
+    if (!parent->children[0]) {
+		    fprintf(stderr, "malloc(%lu) failed\n", (long)sizeof(struct htb_child));
+		    goto fail_conf;
+	  }
+
+    /* using parent value */
+    parent->children[0]->rate = parent->limit
+    parent->children[0]->ceil = parent->limit
+    parent->children[0]->burst = parent->burst
+    parent->children[0]->ceil_burst = parent->burst
+  }
+  
   /* other params of the children */
-  for (i=0; i < parent->n_children; i++) {
+  for (i=0; i < parent->n_children && parent->htb; i++) {
     parent->children[i]->tokens = parent->children[i]->burst;
     
     /* cburst mantain the proportion between ceil and rate */
@@ -232,7 +250,7 @@ tree_init(char *confname, struct htb_parent *parent)
 
     /* create priority array - simplified implementation of priority queue */
 	  parent->children[i]->prioarray = malloc(parent->children[i]->qlen  * sizeof(double));
-	  if (!u->prioarray) {
+	  if (!parent->prioarray) {
 		  fprintf(stderr, "malloc(%lu) failed\n", (long)parent->children[i]->qlen  * sizeof(double));
 		  goto fail_prio_array;
 	  }
@@ -303,6 +321,7 @@ tree_destroy(struct htb_parent *parent)
   free(parent);
 }
 
+/* CHANGE ME */
 static void *
 sender_thread(void *arg)
 {
@@ -367,18 +386,33 @@ sender_thread(void *arg)
 	return NULL;
 }
 
-
-static void
-add_to_queue(struct userdata *u, char *packet, int id,
-	int plen, double prio)
+/* search the node with the class mark equal to the packet iptables mark */
+static int
+search_node(struct htb_parent *parent, uint32_t mark)
 {
-	size_t i, idx = 0;
+  size_t i;
+
+  for (i=0; i<parent->n_children; i++) {
+    if (parent->children[i]->mark == mark)
+      return i;
+  }
+}
+
+/* add packets to the queues */
+static void
+add_to_queue(struct htb_parent *parent, char *packet, int id,
+	int plen, double prio, uint32_t mark)
+{
+	size_t i, idx = 0, node_idx;
 	double min = DBL_MAX;
 
+  /* correct node id */
+  node_idx = search_node(parent, mark);
+
 	/* search for packet with minimum priority */
-	for (i=0; i<u->qlen; i++) {
-		if (min > u->prioarray[i]) {
-			min = u->prioarray[i];
+	for (i=0; i<parent->children[node_idx]->qlen; i++) {
+		if (min > parent->children[node_idx]->prioarray[i]) {
+			min = parent->children[node_idx]->prioarray[i];
 			idx = i;
 		}
 	}
@@ -389,19 +423,21 @@ add_to_queue(struct userdata *u, char *packet, int id,
 			int vres;
 
 			/* drop packet */
-			vres = nfq_set_verdict(u->qh, u->packets[idx].id, NF_DROP, 0, NULL);
+			vres = nfq_set_verdict(parent->qh, parent->children[node_idx]->packets[idx].id, NF_DROP, 0, NULL);
 			if (vres < 0) {
 				fprintf(stderr, "nfq_set_verdict() failed, %s\n", strerror(errno));
 			}
 		}
 
-		u->prioarray[idx] = prio;
-		u->packets[idx].size = plen;
-		u->packets[idx].id = id;
-		memcpy(u->packets[idx].packet, packet, plen);
+    /* add to queue */
+		parent->children[node_idx]->prioarray[idx] = prio;
+		parent->children[node_idx]->packets[idx].size = plen;
+		parent->children[node_idx]->packets[idx].id = id;
+		memcpy(parent->children[node_idx]->packets[idx].packet, packet, plen);
 	}
 }
 
+/* CHANGE ME */
 static int
 on_packet(struct nfq_q_handle *qh,
 		struct nfgenmsg *nfmsg,
@@ -477,13 +513,14 @@ on_packet(struct nfq_q_handle *qh,
 		nfq_set_verdict(u->qh, id, NF_DROP, 0, NULL);
 	} else {
 		/* add to queue with positive weight */
-		add_to_queue(u, p, id, plen, weight);
+		add_to_queue(parent, p, id, plen, weight, mark);
 	}
 	pthread_mutex_unlock(&u->lock);
 
 	return 1;
 }
 
+/* CHANGE ME */
 int
 main(int argc, char *argv[])
 {
@@ -491,7 +528,7 @@ main(int argc, char *argv[])
 	int fd;
 	char buf[0xffff];
 	int r = EXIT_FAILURE;
-	struct userdata *u;
+	struct htb_parent *parent;
 	struct sigaction action;
 
 	if (argc < 2) {
@@ -499,8 +536,7 @@ main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
-  /* New fuction needed -> tree_init() or something */
-	u = userdata_init(argv[1]);
+	tree_init(argv[1], parent);
 	if (!u) {
 		return EXIT_FAILURE;
 	}
@@ -521,19 +557,19 @@ main(int argc, char *argv[])
 		goto fail_bind;
 	}
 
-	u->qh = nfq_create_queue(h, u->queue, &on_packet, u);
-	if (!u->qh) {
-		fprintf(stderr, "nfq_create_queue() with queue %d failed\n", u->queue);
+	parent->qh = nfq_create_queue(h, parent->queue, &on_packet, parent);
+	if (!parent->qh) {
+		fprintf(stderr, "nfq_create_queue() with queue %d failed\n", parent->queue);
 		goto fail_queue;
 	}
 
-	if (nfq_set_mode(u->qh, NFQNL_COPY_PACKET, 0xffff) < 0) {
+	if (nfq_set_mode(parent->qh, NFQNL_COPY_PACKET, 0xffff) < 0) {
 		fprintf(stderr, "nfq_set_mode() failed\n");
 		goto fail_mode;
 	}
 
-	if (nfq_set_queue_maxlen(u->qh, u->nfqlen) < 0) {
-		fprintf(stderr, "nfq_set_queue_maxlen() failed with qlen=%d\n", u->nfqlen);
+	if (nfq_set_queue_maxlen(parent->qh, parent->nfqlen) < 0) {
+		fprintf(stderr, "nfq_set_queue_maxlen() failed with qlen=%d\n", parent->nfqlen);
 		goto fail_mode;
 	}
 
@@ -546,7 +582,7 @@ main(int argc, char *argv[])
 	sigaction(SIGINT, &action, NULL);
 
 	/* create sending thread */
-	pthread_create(&u->sender_tid, NULL, &sender_thread, u);
+	pthread_create(&parent->sender_tid, NULL, &sender_thread, parent);
 
 	fd = nfq_fd(h);
 	for (;;) {
@@ -556,7 +592,7 @@ main(int argc, char *argv[])
 		if ((rv < 0) && (errno != EINTR)) {
 			fprintf(stderr, "recv() on queue returned %d (%s)\n", rv, strerror(errno));
 			fprintf(stderr, "Queue full? Current queue size %d, you can increase 'nfqlen' parameter in damper.conf\n",
-				u->nfqlen);
+				parent->nfqlen);
 			continue; /* don't stop after error */
 		}
 
