@@ -325,6 +325,14 @@ tree_destroy(struct htb_parent *parent)
 }
 
 /* CHANGE ME */
+/* How i want this function to work: TODO
+    1) First htb_refill() for the new generated tokens;
+    2.1) Send e sub the tokens used;
+    2.2) If there aren't enough tokens, borrow from parent is possible (htb_borrow() maybe?), then return to point 2.1;
+    2.3) No borrow and no send then go to the next node;
+    3) Borrow with prio or round robin (more easy for the moment);
+    4) How to manage more node borrowign and how to stop borrowing.
+ */
 static void *
 sender_thread(void *arg)
 {
