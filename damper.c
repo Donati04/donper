@@ -133,17 +133,20 @@ config_read(struct htb_parent *parent, char *confname)
         parent->htb = 0;
       }
     /* new child node */
-		} else if (!strcmp(cmd, "class") && parent->htb == 1){
-      parent->children[n_children] = malloc(sizeof(struct htb_child))
-      if (!parent->children[n_children]) {
-		    fprintf(stderr, "malloc(%lu) failed\n", (long)sizeof(struct htb_child));
-		    goto fail_open;
-	    }
-      parent->children[n_children]->mark = atoi(p2);
-      parent->children[n_children]->rate = str2bytes(p4)/8;
-      parent->children[n_children]->ceil = str2bytes(p6)/8;
-      parent->children[n_children]->burst = str2bytes(p8);
-      parent->n_children += 1;
+		} else if (!strcmp(cmd, "class")){
+      if (parent->htb) {
+        parent->children[n_children] = malloc(sizeof(struct htb_child))
+        if (!parent->children[n_children]) {
+		      fprintf(stderr, "malloc(%lu) failed\n", (long)sizeof(struct htb_child));
+		      goto fail_open;
+	      }
+
+        parent->children[n_children]->mark = atoi(p2);
+        parent->children[n_children]->rate = str2bytes(p4)/8;
+        parent->children[n_children]->ceil = str2bytes(p6)/8;
+        parent->children[n_children]->burst = str2bytes(p8);
+        parent->n_children += 1;
+      }
 		/* module parameters */
     } else {
 			size_t i;
@@ -387,11 +390,14 @@ sender_thread(void *arg)
 }
 
 /* search the node with the class mark equal to the packet iptables mark */
-/* FIX ME not working with tbf */
 static int
 search_node(struct htb_parent *parent, uint32_t mark)
 {
   size_t i;
+  
+  if (!parent->htb) {
+    return 0;
+  }
 
   for (i=0; i<parent->n_children; i++) {
     if (parent->children[i]->mark == mark)
@@ -399,8 +405,6 @@ search_node(struct htb_parent *parent, uint32_t mark)
   }
 }
 
-/* add packets to the queues */
-/* FIX ME not working with tbf */
 static void
 add_to_queue(struct htb_parent *parent, char *packet, int id,
 	int plen, double prio, uint32_t mark)
