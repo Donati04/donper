@@ -17,8 +17,14 @@
 
 #define BILLION ((uint64_t)1000000000)
 
-#define KEEP_STAT 31     /* keep statistics about one month by default */
 #define NFQ_DEFLEN 10000 /* internal queue length */
+
+enum htb_mode
+{
+	RED = 0,
+	GREEN,
+	YELLOW
+};
 
 /* indicate termination by signal */
 volatile sig_atomic_t damper_done = 0;
@@ -106,7 +112,7 @@ config_read(struct htb_parent *parent, char *confname)
 
 		scanres = sscanf(line, "%s %s %s %s %s %s %s %s %s", cmd, p1, p2, p3, p4, p5, p6, p7, p8);
 		/* comment */
-    if ((cmd[0] == '#') || (scanres < 2)) {
+    if ((scanres < 2) || (cmd[0] == '#')) {
 			continue;
 		}
     /* nfequeue number */
@@ -135,11 +141,21 @@ config_read(struct htb_parent *parent, char *confname)
     /* new child node */
 		} else if (!strcmp(cmd, "class")){
       if (parent->htb) {
-        parent->children[n_children] = malloc(sizeof(struct htb_child))
-        if (!parent->children[n_children]) {
-		      fprintf(stderr, "malloc(%lu) failed\n", (long)sizeof(struct htb_child));
-		      goto fail_open;
-	      }
+        struct htb_child **tmp;
+
+        /* grow the children array for every new class */
+        tmp = realloc(parent->children, (parent->n_children + 1) * sizeof(struct htb_child *));
+        if (!tmp) {
+          fprintf(stderr, "realloc() failed\n");
+          goto fail_open;
+        }
+        parent->children = tmp;
+
+        parent->children[parent->n_children] = malloc(sizeof(struct htb_child));
+        if (!parent->children[parent->n_children]) {
+          fprintf(stderr, "malloc(%lu) failed\n", (long)sizeof(struct htb_child));
+          goto fail_open;
+        }
 
         parent->children[n_children]->mark = atoi(p2);
         parent->children[n_children]->rate = str2bytes(p4)/8;
@@ -182,11 +198,21 @@ tree_init(char *confname, struct htb_parent *parent)
 		goto fail_parent;
 	}
 
+  parent->queue = 0;
+  parent->nfqlen = 0;
+  parent->limit = 0;
+  parent->tokens = 0;
+  parent->burst = 0;
+  parent->htb = 0;
   parent->n_children = 0;
+
+  clock_gettime(CLOCK_MONOTONIC, &parent->old_time);
+
   parent->children = malloc(sizeof(struct htb_child *));
 	if (!parent->children) {
-		fprintf(stderr, "malloc(%lu) failed\n", (long)sizeof(struct *htb_child));
-		goto fail_child;
+		fprintf(stderr, "malloc(%lu) failed\n", (long)sizeof(struct htb_child *));
+		free(parent);
+		return NULL;
 	}
 
   /* init modules */
@@ -241,6 +267,8 @@ tree_init(char *confname, struct htb_parent *parent)
     parent->children[i]->ceil_burst = temp_burst;
     parent->children[i]->ceil_tokens = ceil_burst;
     
+    clock_gettime(CLOCK_MONOTONIC, parent->children[i]->old_time);
+
     /* priority queue len set at 100 by default */
     parent->children[i]->qlen = 100;
 
@@ -330,9 +358,16 @@ tree_destroy(struct htb_parent *parent)
     2.1) Send e sub the tokens used;
     2.2) If there aren't enough tokens, borrow from parent is possible (htb_borrow() maybe?), then return to point 2.1;
     2.3) No borrow and no send then go to the next node;
-    3) Borrow with prio or round robin (more easy for the moment);
+    3) Borrow with prio or round robin (easier for the moment);
     4) How to manage more node borrowign and how to stop borrowing.
+ 
+
+    Trash that can work:
+      1) htb_refill()
+      2) htb_sub()
+      3) htb_check()
  */
+
 static void *
 sender_thread(void *arg)
 {
