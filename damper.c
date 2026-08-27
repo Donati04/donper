@@ -12,8 +12,6 @@
 #include <libnetfilter_queue/libnetfilter_queue.h>
 
 #include "damper.h"
-#include "day2epoch.h"
-
 
 #define BILLION ((uint64_t)1000000000)
 
@@ -79,19 +77,6 @@ str2bytes(const char *l)
 	return res * k;
 }
 
-FILE *
-fopen_or_create(const char *path)
-{
-	FILE *f;
-
-	f = fopen(path, "r+");
-	if (f) return f;
-	f = fopen(path, "w+");
-	if (f) return f;
-	fprintf(stderr, "Can't open file '%s'\n", path);
-	return NULL;
-}
-
 static int
 config_read(struct htb_parent *parent, char *confname)
 {
@@ -129,11 +114,12 @@ config_read(struct htb_parent *parent, char *confname)
 		}
     /* parent burst*/
     else if (!strcmp(cmd, "burst")) {
-      parent->burst = str2bytes(p1)
+      parent->burst = str2bytes(p1);
+      parent->tokens = str2bytes(p1);
     }
     /* for htb or tbf*/
     else if (!strcmp(cmd, "htb")) {
-      if (!strcmp(cmd, "yes")) {
+      if (!strcmp(p1, "yes")) {
         parent->htb = 1;
       } else {
         parent->htb = 0;
@@ -157,10 +143,10 @@ config_read(struct htb_parent *parent, char *confname)
           goto fail_open;
         }
 
-        parent->children[n_children]->mark = atoi(p2);
-        parent->children[n_children]->rate = str2bytes(p4)/8;
-        parent->children[n_children]->ceil = str2bytes(p6)/8;
-        parent->children[n_children]->burst = str2bytes(p8);
+        parent->children[parent->n_children]->mark = atoi(p2);
+        parent->children[parent->n_children]->rate = str2bytes(p4)/8;
+        parent->children[parent->n_children]->ceil = str2bytes(p6)/8;
+        parent->children[parent->n_children]->burst = str2bytes(p8);
         parent->n_children += 1;
       }
 		/* module parameters */
@@ -186,11 +172,12 @@ fail_open:
 	return 0;
 }
 
-static void
-tree_init(char *confname, struct htb_parent *parent)
+static struct htb_parent *
+tree_init(char *confname)
 {
   size_t i, j;
   uint64_t temp_burst;
+  struct htb_parent *parent;
 
   parent = malloc(sizeof(struct htb_parent));
 	if (!parent) {
@@ -221,7 +208,7 @@ tree_init(char *confname, struct htb_parent *parent)
 			/* default multiplicator */
 			modules[i].k = 1.0f;
 
-			modules[i].mptr = (modules[i].init)(u, i);
+			modules[i].mptr = (modules[i].init)(i);
 		} else {
 			modules[i].mptr = NULL;
 		}
@@ -245,29 +232,31 @@ tree_init(char *confname, struct htb_parent *parent)
     parent->n_children += 1;
     
     /* using one child node for tbf */
-    parent->children[0] = malloc(sizeof(struct htb_child))
+    parent->children[0] = malloc(sizeof(struct htb_child));
     if (!parent->children[0]) {
 		    fprintf(stderr, "malloc(%lu) failed\n", (long)sizeof(struct htb_child));
 		    goto fail_conf;
 	  }
 
     /* using parent value */
-    parent->children[0]->rate = parent->limit
-    parent->children[0]->ceil = parent->limit
-    parent->children[0]->burst = parent->burst
-    parent->children[0]->ceil_burst = parent->burst
+    parent->children[0]->rate = parent->limit;
+    parent->children[0]->ceil = parent->limit;
+    parent->children[0]->burst = parent->burst;
+    parent->children[0]->ceil_burst = parent->burst;
   }
   
   /* other params of the children */
-  for (i=0; i < parent->n_children && parent->htb; i++) {
+  for (i=0; i < parent->n_children; i++) {
     parent->children[i]->tokens = parent->children[i]->burst;
     
     /* cburst mantain the proportion between ceil and rate */
     temp_burst = (uint64_t) ((double) parent->children[i]->burst * parent->children[i]->ceil / parent->children[i]->rate);
     parent->children[i]->ceil_burst = temp_burst;
-    parent->children[i]->ceil_tokens = ceil_burst;
+    parent->children[i]->ceil_tokens = temp_burst;
     
-    clock_gettime(CLOCK_MONOTONIC, parent->children[i]->old_time);
+    clock_gettime(CLOCK_MONOTONIC, &parent->children[i]->old_time);
+    clock_gettime(CLOCK_MONOTONIC, &parent->children[i]->ceil_old_time);
+
 
     /* priority queue len set at 100 by default */
     parent->children[i]->qlen = 100;
@@ -281,13 +270,13 @@ tree_init(char *confname, struct htb_parent *parent)
 
     /* create priority array - simplified implementation of priority queue */
 	  parent->children[i]->prioarray = malloc(parent->children[i]->qlen  * sizeof(double));
-	  if (!parent->prioarray) {
+	  if (!parent->children[i]->prioarray) {
 		  fprintf(stderr, "malloc(%lu) failed\n", (long)parent->children[i]->qlen  * sizeof(double));
 		  goto fail_prio_array;
 	  }
 	  /* fill priority array with minimal possible values */
-	  for (i=0; i < parent->children[i]->qlen; i++) {
-		  parent->children[i]->prioarray[i] = DBL_MIN;
+	  for (j=0; j < parent->children[i]->qlen; j++) {
+		  parent->children[i]->prioarray[j] = DBL_MIN;
 	  }
   }
 
@@ -310,14 +299,14 @@ tree_init(char *confname, struct htb_parent *parent)
 		}
 	}
 
-  return;
+  return parent;
 
 fail_prio_array:
   /* delete priority queues */
 	free(parent->children[i]->packets);
   for (j=0; j < i; j++){
-    free(parent->children[j]->prioarray)
-    free(parent->children[j]->packets)
+    free(parent->children[j]->prioarray);
+    free(parent->children[j]->packets);
   }
 fail_packets:
 fail_conf:
@@ -325,7 +314,7 @@ fail_conf:
 fail_child:
   free(parent);
 fail_parent:
-	return;
+	return NULL;
 }
 
 static void
@@ -344,9 +333,9 @@ tree_destroy(struct htb_parent *parent)
 
 	pthread_mutex_destroy(&parent->lock);
 
-  for (i=0, i < parent->n_children; i++) {
-	  free(parent->children[i]->prioarray)
-    free(parent->children[i]->packets)
+  for (i=0; i < parent->n_children; i++) {
+	  free(parent->children[i]->prioarray);
+    free(parent->children[i]->packets);
   }
 	free(parent->children);
   free(parent);
@@ -368,65 +357,164 @@ tree_destroy(struct htb_parent *parent)
       3) htb_check()
  */
 
+
+static enum htb_mode
+htb_check(struct htb_parent *parent, struct htb_child *child,
+	int64_t size)
+{
+	if ((child->tokens >= size) &&
+	    (child->ceil_tokens >= size)) {
+		return GREEN;
+	}
+
+	if ((parent->limit != UINT64_MAX) &&
+	    (parent->tokens < size)) {
+		return RED;
+	}
+
+	if (child->ceil_tokens >= size) {
+		return YELLOW;
+	}
+
+	return RED;
+}
+
+static void
+htb_refill(struct timespec *old_time, int64_t *tokens,
+	int64_t burst, uint64_t rate)
+{
+	struct timespec now;
+	int64_t ns, add;
+
+	/* bucket always full */
+	if (rate == UINT64_MAX) {
+		*tokens = burst;
+		return;
+	}
+
+	/* no token generated */
+	if (rate == 0) {
+		return;
+	}
+
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+  /* time passed in nano second */
+	ns = (now.tv_sec - old_time->tv_sec) * (int64_t)BILLION + (now.tv_nsec - old_time->tv_nsec);
+	if (ns <= 0) {
+		return;
+	}
+
+	/* bucket already full */
+	if (*tokens >= burst) {
+		*old_time = now;
+		return;
+	}
+
+  /* token generated */
+	add = (ns / (int64_t)BILLION) * (int64_t)rate + ((ns % (int64_t)BILLION) * (int64_t)rate) / (int64_t)BILLION;
+
+  /* for token overflow */
+	*tokens += add;
+	if (*tokens > burst) {
+		*tokens = burst;
+	}
+
+	*old_time = now;
+}
+
+/* search best packet in a child to send */
+static ssize_t
+search_best_packet(struct htb_child *child)
+{
+	size_t i;
+	double max = DBL_MIN;
+	ssize_t idx = -1;
+
+	for (i = 0; i < child->qlen; i++) {
+		if (child->prioarray[i] > max) {
+			max = child->prioarray[i];
+			idx = (ssize_t)i;
+		}
+	}
+
+	return idx;
+}
+
 static void *
 sender_thread(void *arg)
 {
-
-	struct htb_parent *parent = arg;
-	int vres;
-	size_t i, idx = 0;
-	double max = DBL_MIN;
-	uint64_t limit;
-	uint64_t sleep_ns;
+  struct htb_parent *parent = arg;
+	struct timespec ts;
+	size_t rr = 0;
 
 	for (;;) {
-		struct timespec ts;
+    if (damper_done) {
+      break;
+    }
 
-		pthread_mutex_lock(&u->lock);
-		limit = u->limit;
+    int sent = 0;
+		size_t i;
 
-		if ((limit == 0) || (limit == UINT64_MAX)) {
-			/* change limit to kbyte/sec, so will sleep about 0.1 sec */
-			limit = 1000;
-		}
+		pthread_mutex_lock(&parent->lock);
 
-		/* search for packet with maximum priority */
-		max = DBL_MIN;
-		for (i=0; i<u->qlen; i++) {
-			if (max < u->prioarray[i]) {
-				max = u->prioarray[i];
-				idx = i;
+		/* refill parent node */
+		htb_refill(&parent->old_time, &parent->tokens,
+			parent->burst, parent->limit);
+
+    for (i = 0; i < parent->n_children; i++) {
+			size_t node_idx = (rr + i) % parent->n_children;
+      ssize_t idx;
+			struct htb_child *child = parent->children[node_idx];
+			enum htb_mode mode;
+			int vres;
+			int64_t size;
+
+      /* refill child node */
+		  htb_refill(&child->old_time, &child->tokens, child->burst, child->rate);
+		  htb_refill(&child->ceil_old_time, &child->ceil_tokens, child->burst, child->ceil);
+
+			idx = search_best_packet(child);
+			if (idx < 0) {
+				/* empty */
+				continue;
 			}
-		}
 
-		if (max != DBL_MIN) {
-			/* accept (send) packet */
-			vres = nfq_set_verdict(u->qh, u->packets[idx].id,
-				NF_ACCEPT, u->packets[idx].size, u->packets[idx].packet);
+			size = child->packets[idx].size;
 
+			mode = htb_check(parent, child, size);
+			if (mode == RED) {
+				/* no send */
+        continue;
+			}
+
+			vres = nfq_set_verdict(parent->qh, child->packets[idx].id,
+				NF_ACCEPT, child->packets[idx].size, child->packets[idx].packet);
 			if (vres < 0) {
 				fprintf(stderr, "nfq_set_verdict() failed, %s\n", strerror(errno));
 			}
 
-			/* mark packet buffer as empty */
-			u->prioarray[idx] = DBL_MIN;
+			child->tokens -= size;
+			parent->tokens -= size;
+			if (mode == YELLOW) {
+				child->ceil_tokens -= size;
+			}
 
-			sleep_ns = (u->packets[idx].size * BILLION) / limit;
-		} else {
-			/* no data to send, so just sleep for time required to transfer 100 bytes */
-			sleep_ns = 100 * BILLION / limit;
+      child->prioarray[idx] = DBL_MIN;
+
+			rr = (node_idx + 1) % parent->n_children;
+			sent = 1;
+			break;
 		}
 
-		if (sleep_ns > BILLION) {
-			ts.tv_sec = sleep_ns / BILLION;
-			ts.tv_nsec = sleep_ns % BILLION;
-		} else {
+		pthread_mutex_unlock(&parent->lock);
+
+		if (!sent) {	
 			ts.tv_sec = 0;
-			ts.tv_nsec = sleep_ns;
+			ts.tv_nsec = 1000000; /* 1 ms */
+			clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, NULL);
 		}
 
-		pthread_mutex_unlock(&u->lock);
-		clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, NULL);
 	}
 
 	return NULL;
@@ -436,7 +524,7 @@ sender_thread(void *arg)
 static int
 search_node(struct htb_parent *parent, uint32_t mark)
 {
-  size_t i;
+  int i;
   
   if (!parent->htb) {
     return 0;
@@ -446,17 +534,24 @@ search_node(struct htb_parent *parent, uint32_t mark)
     if (parent->children[i]->mark == mark)
       return i;
   }
+
+  return -1;
 }
 
 static void
 add_to_queue(struct htb_parent *parent, char *packet, int id,
 	int plen, double prio, uint32_t mark)
 {
-	size_t i, idx = 0, node_idx;
+	size_t i, idx = 0;
+  int node_idx;
 	double min = DBL_MAX;
 
   /* correct node id */
   node_idx = search_node(parent, mark);
+  if (node_idx < 0) {
+    nfq_set_verdict(parent->qh, id, NF_DROP, 0, NULL);
+    return;
+  }
 
 	/* search for packet with minimum priority */
 	for (i=0; i<parent->children[node_idx]->qlen; i++) {
@@ -569,10 +664,10 @@ main(int argc, char *argv[])
 		return EXIT_FAILURE;
 	}
 
-	tree_init(argv[1], parent);
-	if (!u) {
-		return EXIT_FAILURE;
-	}
+	parent = tree_init(argv[1]);
+  if (!parent) {
+    return EXIT_FAILURE;
+  }
 
 	h = nfq_open();
 	if (!h) {
@@ -639,14 +734,14 @@ main(int argc, char *argv[])
 	r = EXIT_SUCCESS;
 
 fail_mode:
-	nfq_destroy_queue(u->qh);
+	nfq_destroy_queue(parent->qh);
 
 fail_queue:
 fail_bind:
 fail_unbind:
 	nfq_close(h);
-
-	userdata_destroy(u);
+  
+	tree_destroy(parent);
 
 	return r;
 }
