@@ -362,8 +362,7 @@ static enum htb_mode
 htb_check(struct htb_parent *parent, struct htb_child *child,
 	int64_t size)
 {
-	if ((child->tokens >= size) &&
-	    (child->ceil_tokens >= size)) {
+	if ((child->tokens >= size)) {
 		return GREEN;
 	}
 
@@ -472,7 +471,7 @@ sender_thread(void *arg)
 
       /* refill child node */
 		  htb_refill(&child->old_time, &child->tokens, child->burst, child->rate);
-		  htb_refill(&child->ceil_old_time, &child->ceil_tokens, child->burst, child->ceil);
+		  htb_refill(&child->ceil_old_time, &child->ceil_tokens, child->ceil_burst, child->ceil);
 
 			idx = search_best_packet(child);
 			if (idx < 0) {
