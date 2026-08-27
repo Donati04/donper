@@ -24,8 +24,6 @@ struct entropy
 	pthread_t debug_tid;
 	pthread_mutex_t lock;
 
-	char *statdir;
-	FILE *fdbg;
 };
 
 /* Shannon's entropy calculation */
@@ -59,7 +57,7 @@ entropy_calc(struct entflow *e)
 }
 
 void *
-entropy_init(struct userdata *u, size_t n)
+entropy_init(size_t n)
 {
 	struct entropy *data;
 
@@ -76,7 +74,6 @@ entropy_init(struct userdata *u, size_t n)
 
 	data->debug = 0;
 	data->module_number = n;
-	data->statdir = u->statdir;
 	data->sport = data->dport = -1;
 	pthread_mutex_init(&data->lock, NULL);
 
@@ -93,14 +90,6 @@ entropy_conf(void *arg, char *param1, char *param2)
 
 	if (!strcmp(param1, "nrecent")) {
 		data->nflows = atoi(param2);
-	} else if (!strcmp(param1, "debug")) {
-		data->debug = atoi(param2);
-		if (data->debug <= 0) {
-			fprintf(stderr, "Module %s: strange debug value %d\n",
-				modules[data->module_number].name,
-				data->debug);
-			data->debug = 0;
-		}
 	} else if (!strcmp(param1, "sport")) {
 		data->sport = atoi(param2);
 	} else if (!strcmp(param1, "dport")) {
@@ -109,47 +98,6 @@ entropy_conf(void *arg, char *param1, char *param2)
 		fprintf(stderr, "Module %s: unknown config parameter '%s'\n",
 			modules[data->module_number].name, param1);
 	}
-}
-
-void *
-entropy_debug(void *arg)
-{
-	struct entropy *data = arg;
-	int i;
-
-	for (;;) {
-		time_t t;
-		struct tm* tm_info;
-		char tbuf[100];
-
-		sleep(data->debug);
-		pthread_mutex_lock(&data->lock);
-
-		time(&t);
-		tm_info = localtime(&t);
-		strftime(tbuf, sizeof(tbuf), "%Y:%m:%d %H:%M:%S", tm_info);
-
-		fprintf(data->fdbg, "%s\n", tbuf);
-		for (i=0; i<data->nflows; i++) {
-			struct in_addr saddr, daddr;
-			int proto, sport, dport;
-
-			saddr.s_addr = data->recent_flows[i].saddr;
-			daddr.s_addr = data->recent_flows[i].daddr;
-			proto = data->recent_flows[i].proto;
-			sport = data->recent_flows[i].sport;
-			dport = data->recent_flows[i].dport;
-
-			fprintf(data->fdbg, "%d: [prot: %3d %s:%d =>\t", i, proto, inet_ntoa(saddr), sport);
-			fprintf(data->fdbg, "%s:%d] %f\n", inet_ntoa(daddr), dport, entropy_calc(&data->recent_flows[i]));
-		}
-
-		pthread_mutex_unlock(&data->lock);
-
-		fprintf(data->fdbg, "\n\n");
-		fflush(data->fdbg);
-	}
-	return NULL;
 }
 
 int
@@ -172,19 +120,6 @@ entropy_postconf(void *arg)
 	}
 	memset(data->recent_flows, 0, data->nflows * sizeof(struct entflow));
 
-	if (data->debug) {
-		char debugfile[PATH_MAX];
-
-		snprintf(debugfile, PATH_MAX, "%s/entlog.txt", data->statdir);
-		data->fdbg = fopen(debugfile, "a");
-		if (!data->fdbg) {
-			fprintf(stderr, "Module %s: can't open file '%s'\n",
-				modules[data->module_number].name, debugfile);
-			goto fail;
-		}
-		pthread_create(&data->debug_tid, NULL, &entropy_debug, data);
-	}
-
 	return 1;
 
 fail:
@@ -196,9 +131,6 @@ entropy_free(void *arg)
 {
 	struct entropy *data = arg;
 
-	if (data->debug) {
-		fclose(data->fdbg);
-	}
 	free(data->recent_flows);
 	free(data);
 }
@@ -242,10 +174,6 @@ entropy_weight(void *arg, char *packet, int packetlen, int mark)
 		payload = packet + ip_hdrlen;
 	}
 
-	if (data->debug) {
-		pthread_mutex_lock(&data->lock);
-	}
-
 	for (i=0; i<data->nflows; i++) {
 		if ((saddr == data->recent_flows[i].saddr) && (daddr == data->recent_flows[i].daddr)
 			&& (proto == data->recent_flows[i].proto)
@@ -282,10 +210,6 @@ entropy_weight(void *arg, char *packet, int packetlen, int mark)
 
 	/* and calculate entropy */
 	m = entropy_calc(&data->recent_flows[i]);
-
-	if (data->debug) {
-		pthread_mutex_unlock(&data->lock);
-	}
 
 	return m;
 }

@@ -4,7 +4,7 @@ struct mod_random
 };
 
 void *
-random_init(struct userdata *u, size_t n)
+random_init(size_t n)
 {
 	struct mod_random *data;
 

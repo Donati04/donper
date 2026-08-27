@@ -16,12 +16,10 @@ struct inhibit_big_flows
 	pthread_t debug_tid;
 	pthread_mutex_t lock;
 
-	char *statdir;
-	FILE *fdbg;
 };
 
 void *
-inhibit_big_flows_init(struct userdata *u, size_t n)
+inhibit_big_flows_init(size_t n)
 {
 	struct inhibit_big_flows *data;
 
@@ -39,7 +37,6 @@ inhibit_big_flows_init(struct userdata *u, size_t n)
 
 	data->debug = 0;
 	data->module_number = n;
-	data->statdir = u->statdir;
 	pthread_mutex_init(&data->lock, NULL);
 
 	return data;
@@ -69,34 +66,6 @@ inhibit_big_flows_conf(void *arg, char *param1, char *param2)
 	}
 }
 
-void *
-inhibit_big_flows_debug(void *arg)
-{
-	struct inhibit_big_flows *data = arg;
-	int i;
-
-	for (;;) {
-		sleep(data->debug);
-		pthread_mutex_lock(&data->lock);
-
-		fprintf(data->fdbg, "total: %lu\n", (long)data->flow_octets);
-		for (i=0; i<data->nflows; i++) {
-			struct in_addr saddr, daddr;
-
-			saddr.s_addr = data->recent_flows[i].saddr;
-			daddr.s_addr = data->recent_flows[i].daddr;
-			fprintf(data->fdbg, "%d: [%s => ", i, inet_ntoa(saddr));
-			fprintf(data->fdbg, "%s] %lu\n", inet_ntoa(daddr), (long)data->recent_flows[i].octets);
-		}
-
-		pthread_mutex_unlock(&data->lock);
-
-		fprintf(data->fdbg, "\n\n");
-		fflush(data->fdbg);
-	}
-	return NULL;
-}
-
 int
 inhibit_big_flows_postconf(void *arg)
 {
@@ -116,20 +85,7 @@ inhibit_big_flows_postconf(void *arg)
 		goto fail;
 	}
 	memset(data->recent_flows, 0, data->nflows * sizeof(struct flow));
-
-	if (data->debug) {
-		char debugfile[PATH_MAX];
-
-		snprintf(debugfile, PATH_MAX, "%s/ilog.txt", data->statdir);
-		data->fdbg = fopen(debugfile, "a");
-		if (!data->fdbg) {
-			fprintf(stderr, "Module %s: can't open file '%s'\n",
-				modules[data->module_number].name, debugfile);
-			goto fail;
-		}
-		pthread_create(&data->debug_tid, NULL, &inhibit_big_flows_debug, data);
-	}
-
+	
 	return 1;
 
 fail:
@@ -141,9 +97,6 @@ inhibit_big_flows_free(void *arg)
 {
 	struct inhibit_big_flows *data = arg;
 
-	if (data->debug) {
-		fclose(data->fdbg);
-	}
 	free(data->recent_flows);
 	free(data);
 }

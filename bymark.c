@@ -13,7 +13,7 @@ struct bymark
 };
 
 void *
-bymark_init(struct userdata *u, size_t n)
+bymark_init(size_t n)
 {
 	struct bymark *data;
 
