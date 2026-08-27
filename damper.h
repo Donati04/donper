@@ -63,6 +63,7 @@ struct htb_child {
     int64_t ceil_burst;    /* burst for borrowing */
 
     struct timespec old_time;  /* old time to generate new tokens */
+    struct timespec ceil_old_time; 
 
     /* priotirty queue */
     struct mpacket *packets;
@@ -93,7 +94,7 @@ struct htb_parent {
 
 /* modules */
 
-typedef void * (*module_init_func)    (struct userdata *, size_t n);
+typedef void * (*module_init_func)    (size_t n);
 typedef void   (*module_conf_func)    (void *, char *param1, char *param2);
 typedef int    (*module_postconf_func)(void *);
 typedef double (*module_weight_func)  (void *, char *packet, int packetlen, int mark);
