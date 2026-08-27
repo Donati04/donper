@@ -488,8 +488,7 @@ sender_thread(void *arg)
         continue;
 			}
 
-			vres = nfq_set_verdict(parent->qh, child->packets[idx].id,
-				NF_ACCEPT, child->packets[idx].size, child->packets[idx].packet);
+			vres = nfq_set_verdict(parent->qh, child->packets[idx].id, NF_ACCEPT, 0, NULL);
 			if (vres < 0) {
 				fprintf(stderr, "nfq_set_verdict() failed, %s\n", strerror(errno));
 			}
@@ -578,6 +577,9 @@ add_to_queue(struct htb_parent *parent, char *packet, int id,
 		parent->children[node_idx]->packets[idx].size = plen;
 		parent->children[node_idx]->packets[idx].id = id;
 		memcpy(parent->children[node_idx]->packets[idx].packet, packet, plen);
+	}
+  else {
+		nfq_set_verdict(parent->qh, id, NF_DROP, 0, NULL);
 	}
 }
 
